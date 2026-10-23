@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAssistantChat } from './useAssistantChat';
+import { warmUpChatApi } from './chatClient';
 import { isTaniaBirthday, getTaniaAge } from './birthDateUtils';
 import styles from './AssistantWidget.module.css';
 
@@ -26,12 +27,18 @@ export default function AssistantWidget() {
   const {
     messages,
     isLoading,
+    isConnecting,
     error,
     sendMessage,
     clearChat,
     retryLastMessage,
     cancelMessage,
   } = useAssistantChat();
+
+  // Despertar el backend al cargar el asistente, antes del primer mensaje
+  useEffect(() => {
+    warmUpChatApi();
+  }, []);
 
   // Auto-scroll al último mensaje
   useEffect(() => {
@@ -203,7 +210,9 @@ export default function AssistantWidget() {
             {isLoading && (
               <div className={`${styles.message} ${styles.assistantMessage}`}>
                 <div className={styles.loadingBubble}>
-                  <span className={styles.loadingText}>Tania está escribiendo</span>
+                  <span className={styles.loadingText}>
+                    {isConnecting ? 'Conectando con Tania...' : 'Tania está escribiendo'}
+                  </span>
                   <div className={styles.loadingDots}>
                     <span />
                     <span />

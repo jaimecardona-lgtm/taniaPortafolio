@@ -7,6 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.models.chat import ChatRequest, ChatResponse, ChatMessage
 from app.services.openrouter import openrouter
+from app.services.response_guard import (
+    CLEANUP_INSTRUCTION,
+    SAFE_FALLBACK_TEXT,
+    has_reasoning_leak,
+    sanitize_assistant_text,
+)
 from app.prompts.tania import TANIA_SYSTEM_PROMPT
 
 # Logging
@@ -56,7 +62,19 @@ async def chat(request: ChatRequest):
             messages=request.messages,
         )
 
-        return ChatResponse(content=response_text)
+        # Si el modelo filtró razonamiento, un único reintento de limpieza
+        if has_reasoning_leak(response_text):
+            logger.warning("Reasoning leak detected; requesting one cleanup retry")
+            response_text = await openrouter.chat(
+                system_prompt=f"{TANIA_SYSTEM_PROMPT}\n\n{CLEANUP_INSTRUCTION}",
+                messages=request.messages,
+            )
+
+            if has_reasoning_leak(response_text):
+                logger.error("Cleanup retry still leaked reasoning; using safe fallback")
+                response_text = SAFE_FALLBACK_TEXT
+
+        return ChatResponse(content=sanitize_assistant_text(response_text))
 
     except TimeoutError:
         logger.warning("Chat request timeout")

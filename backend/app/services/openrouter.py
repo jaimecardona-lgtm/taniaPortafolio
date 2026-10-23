@@ -1,14 +1,22 @@
 """Servicio para comunicación con OpenRouter"""
 
 import httpx
-import json
 import logging
-from typing import Optional
 
 from app.core.config import settings
 from app.models.chat import ChatMessage
 
 logger = logging.getLogger(__name__)
+
+# Razonamiento mínimo y excluido de la respuesta visible.
+# Solo se lee message.content; el campo reasoning nunca se retorna.
+REASONING_CONFIG = {"effort": "minimal", "exclude": True}
+
+# Errores que justifican intentar el modelo fallback
+RECOVERABLE_STATUSES = (429, 500, 502, 503, 504)
+
+# Errores que no se reintentan: la solicitud en sí es inválida o no autorizada
+NON_RECOVERABLE_STATUSES = (400, 401, 403)
 
 
 class OpenRouterService:
@@ -37,7 +45,7 @@ class OpenRouterService:
         system_prompt: str,
         messages: list[ChatMessage],
     ) -> str:
-        """Llama a OpenRouter con el modelo especificado"""
+        """Llama a OpenRouter con el modelo especificado y devuelve message.content"""
         payload = {
             "model": model,
             "messages": [
@@ -47,6 +55,7 @@ class OpenRouterService:
             "temperature": settings.chat_temperature,
             "top_p": settings.chat_top_p,
             "max_tokens": settings.chat_max_tokens,
+            "reasoning": REASONING_CONFIG,
         }
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -58,14 +67,10 @@ class OpenRouterService:
                 )
 
                 if not response.is_success:
-                    return self._handle_error(response, model)
+                    self._handle_error(response, model)
 
                 data = response.json()
-                if not data.get("choices"):
-                    logger.error(f"No choices in OpenRouter response for {model}")
-                    raise ValueError("Empty response from OpenRouter")
-
-                return data["choices"][0]["message"]["content"]
+                return self._extract_content(data, model)
 
             except httpx.TimeoutException:
                 logger.warning(f"Timeout calling {model}")
@@ -74,22 +79,37 @@ class OpenRouterService:
                 logger.error(f"Request error calling {model}: {e}")
                 raise ConnectionError(str(e))
 
-    def _handle_error(self, response: httpx.Response, model: str) -> str:
-        """Maneja errores de OpenRouter"""
+    def _extract_content(self, data: dict, model: str) -> str:
+        """Extrae únicamente message.content; cualquier otra cosa es recuperable"""
+        choices = data.get("choices") or []
+        if not choices:
+            logger.error(f"No choices in OpenRouter response for {model}")
+            raise ConnectionError(f"Respuesta sin choices de {model}")
+
+        content = (choices[0].get("message") or {}).get("content")
+        if not isinstance(content, str) or not content.strip():
+            logger.error(f"Empty message.content from {model}")
+            raise ConnectionError(f"Respuesta vacía de {model}")
+
+        return content
+
+    def _handle_error(self, response: httpx.Response, model: str) -> None:
+        """
+        Convierte un error HTTP en excepción.
+        - 400/401/403: ValueError (no se reintenta ni se usa fallback).
+        - Cualquier otro: ConnectionError, que chat() usa para activar el fallback.
+        """
         status = response.status_code
 
-        # Errores no recuperables
-        if status in (400, 401, 403):
+        if status in NON_RECOVERABLE_STATUSES:
             logger.error(f"OpenRouter {status}: {response.text}")
             raise ValueError(f"OpenRouter error: {response.text[:200]}")
 
-        # Errores recuperables
-        if self.use_fallback and self.fallback_model and self.fallback_model != model:
-            if status in (429, 500, 502, 503, 504):
-                logger.warning(f"Fallback triggered: {model} returned {status}")
-                return "FALLBACK"
+        if status in RECOVERABLE_STATUSES:
+            logger.warning(f"OpenRouter {status} from {model}")
+        else:
+            logger.error(f"OpenRouter {status} from {model}: {response.text[:300]}")
 
-        logger.error(f"OpenRouter {status}: {response.text}")
         raise ConnectionError(f"OpenRouter error {status}")
 
     async def chat(
@@ -105,10 +125,15 @@ class OpenRouterService:
         try:
             return await self.call_model(self.primary_model, system_prompt, messages)
         except (TimeoutError, ConnectionError) as e:
-            if not self.use_fallback or not self.fallback_model:
+            can_fallback = (
+                self.use_fallback
+                and self.fallback_model
+                and self.fallback_model != self.primary_model
+            )
+            if not can_fallback:
                 raise
 
-            logger.info(f"Attempting fallback model: {self.fallback_model}")
+            logger.info(f"Primary model failed ({e}); attempting fallback: {self.fallback_model}")
             try:
                 return await self.call_model(
                     self.fallback_model, system_prompt, messages

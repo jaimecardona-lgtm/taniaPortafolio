@@ -1,14 +1,32 @@
 import { useState, useCallback, useRef } from 'react';
 import { sendChatMessage } from './chatClient';
 
+// Si la respuesta tarda más que esto, se asume cold start y se muestra "Conectando"
+const CONNECTING_HINT_DELAY = 4000;
+
 /**
  * Hook para gestionar el estado de la conversación del asistente
  */
 export function useAssistantChat() {
   const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState(null);
   const abortControllerRef = useRef(null);
+
+  /**
+   * Pide respuesta al backend y actualiza el estado de conexión
+   */
+  const requestReply = useCallback((history, signal) => {
+    const hintTimer = setTimeout(() => setIsConnecting(true), CONNECTING_HINT_DELAY);
+
+    return sendChatMessage(history, signal, {
+      onRetry: () => setIsConnecting(true),
+    }).finally(() => {
+      clearTimeout(hintTimer);
+      setIsConnecting(false);
+    });
+  }, []);
 
   /**
    * Envía un mensaje y obtiene respuesta del asistente
@@ -39,7 +57,7 @@ export function useAssistantChat() {
         // Crear nuevo AbortController para esta solicitud
         abortControllerRef.current = new AbortController();
 
-        const response = await sendChatMessage(
+        const response = await requestReply(
           historyToSend,
           abortControllerRef.current.signal
         );
@@ -55,7 +73,7 @@ export function useAssistantChat() {
         abortControllerRef.current = null;
       }
     },
-    [messages]
+    [messages, requestReply]
   );
 
   /**
@@ -94,8 +112,6 @@ export function useAssistantChat() {
 
     if (lastUserMessageIndex === -1) return;
 
-    const userMessage = messages[lastUserMessageIndex].content;
-
     // Remover cualquier mensaje de error o respuesta incompleta después del último usuario
     setMessages((prev) => prev.slice(0, lastUserMessageIndex + 1));
     setError(null);
@@ -107,27 +123,27 @@ export function useAssistantChat() {
     try {
       abortControllerRef.current = new AbortController();
 
-      sendChatMessage(
-        historyToSend,
-        abortControllerRef.current.signal
-      ).then((response) => {
-        setMessages((prev) => [...prev, response]);
-        setError(null);
-        setIsLoading(false);
-      }).catch((err) => {
-        const errorMessage = err.message || 'Ocurrió un error al procesar tu solicitud.';
-        setError(errorMessage);
-        setIsLoading(false);
-      });
+      requestReply(historyToSend, abortControllerRef.current.signal)
+        .then((response) => {
+          setMessages((prev) => [...prev, response]);
+          setError(null);
+          setIsLoading(false);
+        })
+        .catch((err) => {
+          const errorMessage = err.message || 'Ocurrió un error al procesar tu solicitud.';
+          setError(errorMessage);
+          setIsLoading(false);
+        });
     } catch (err) {
       setError(err.message || 'Error desconocido');
       setIsLoading(false);
     }
-  }, [messages]);
+  }, [messages, requestReply]);
 
   return {
     messages,
     isLoading,
+    isConnecting,
     error,
     sendMessage,
     clearChat,

@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     openrouter_site_name: str = "Tania Peláez Valverde Portfolio"
 
     # Chat LLM
-    chat_primary_llm: str = "google/gemini-2.5-flash-lite"
-    chat_fallback_llm: str = "openrouter/free"
+    chat_primary_llm: str = "google/gemini-3.1-flash-lite"
+    chat_fallback_llm: str = "google/gemini-3.7-flash"
     chat_use_fallback: bool = True
 
     # Chat parameters
