@@ -6,9 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.models.chat import ChatRequest, ChatResponse, ChatMessage
-from app.services.openrouter import openrouter
+from app.services.openrouter import openrouter, RateLimitError, ProviderError
 from app.services.response_guard import (
-    CLEANUP_INSTRUCTION,
     SAFE_FALLBACK_TEXT,
     has_reasoning_leak,
     sanitize_assistant_text,
@@ -56,25 +55,36 @@ async def chat(request: ChatRequest):
         # Validar request
         request.validate_messages()
 
-        # Llamar a OpenRouter con fallback
+        # Llamar a OpenRouter con fallback (máximo 2 requests)
         response_text = await openrouter.chat(
             system_prompt=TANIA_SYSTEM_PROMPT,
             messages=request.messages,
         )
 
-        # Si el modelo filtró razonamiento, un único reintento de limpieza
-        if has_reasoning_leak(response_text):
-            logger.warning("Reasoning leak detected; requesting one cleanup retry")
-            response_text = await openrouter.chat(
-                system_prompt=f"{TANIA_SYSTEM_PROMPT}\n\n{CLEANUP_INSTRUCTION}",
-                messages=request.messages,
-            )
+        # Limpieza local, sin nuevas llamadas al modelo
+        cleaned_text = sanitize_assistant_text(response_text)
+        if has_reasoning_leak(cleaned_text):
+            logger.warning("Reasoning leak survived local cleanup; using safe fallback")
+            cleaned_text = SAFE_FALLBACK_TEXT
 
-            if has_reasoning_leak(response_text):
-                logger.error("Cleanup retry still leaked reasoning; using safe fallback")
-                response_text = SAFE_FALLBACK_TEXT
+        return ChatResponse(content=cleaned_text)
 
-        return ChatResponse(content=sanitize_assistant_text(response_text))
+    except RateLimitError:
+        logger.warning("OpenRouter rate limit reached")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "Tania está recibiendo muchas consultas en este momento. "
+                "Intenta nuevamente en unos minutos."
+            ),
+        )
+
+    except ProviderError as e:
+        logger.error(f"OpenRouter provider error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="No se pudo procesar tu solicitud en este momento.",
+        )
 
     except TimeoutError:
         logger.warning("Chat request timeout")

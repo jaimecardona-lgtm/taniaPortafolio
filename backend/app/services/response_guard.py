@@ -21,13 +21,7 @@ _LEAK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Instrucción para el único reintento de limpieza
-CLEANUP_INSTRUCTION = (
-    "Return only the final user-facing answer in Spanish.\n"
-    "Do not include analysis, reasoning, planning or drafting."
-)
-
-# Respuesta segura si el reintento de limpieza también filtra razonamiento
+# Respuesta segura si la limpieza local no deja una respuesta válida
 SAFE_FALLBACK_TEXT = (
     "Claro 😊 Cuéntame un poco más sobre lo que buscas y con gusto te ayudo "
     "con mi experiencia, mis proyectos o mi contacto."

@@ -8,9 +8,10 @@ const CHAT_REQUEST_TIMEOUT = 75000;
 // Timeout separado para el warmup: no bloquea nada, solo despierta el backend
 const WARMUP_TIMEOUT = 60000;
 
-// Reintentos con backoff para 502/503/504 (cold start / gateway)
-const RETRY_DELAYS = [2000, 4000, 8000];
-const RETRYABLE_STATUSES = [502, 503, 504];
+// Sin reintentos automáticos: el backend ya hace fallback y cada request consume
+// el free tier. Si falla, el usuario reintenta manualmente con el botón.
+const RATE_LIMIT_MESSAGE =
+  'Tania está recibiendo muchas consultas en este momento. Intenta nuevamente en unos minutos.';
 
 /**
  * Obtiene la URL base del API
@@ -85,7 +86,7 @@ async function attemptChat(endpoint, messages, signal) {
 
     if (!response.ok) {
       if (response.status === 429) {
-        throw httpError(429, 'Demasiadas solicitudes. Intenta más tarde.');
+        throw httpError(429, RATE_LIMIT_MESSAGE);
       }
 
       if (response.status >= 500) {
@@ -130,64 +131,12 @@ async function attemptChat(endpoint, messages, signal) {
 }
 
 /**
- * ¿Vale la pena reintentar este error?
- * Solo 502/503/504 y fallos de red (fetch lanza TypeError). Nunca 400/401/403.
- */
-function isRetryable(error) {
-  if (error.status !== undefined) {
-    return RETRYABLE_STATUSES.includes(error.status);
-  }
-  return error instanceof TypeError;
-}
-
-/**
- * Espera el backoff, cancelable con el signal del usuario
- */
-function wait(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(cancelledError());
-      return;
-    }
-
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(cancelledError());
-    };
-
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-
-    signal?.addEventListener('abort', onAbort);
-  });
-}
-
-/**
- * Realiza una solicitud de chat al servidor, con reintentos automáticos.
- * El mensaje del usuario se envía una sola vez; los reintentos ocurren aquí dentro.
+ * Realiza una única solicitud de chat al servidor (sin reintentos).
  * @param {Array} messages - Historial de mensajes
  * @param {AbortSignal} signal - Signal para cancelar la solicitud
- * @param {{onRetry?: (attempt: number) => void}} options - Callback al iniciar un reintento
  * @returns {Promise<{role: string, content: string}>}
  */
-export async function sendChatMessage(messages, signal, { onRetry } = {}) {
+export async function sendChatMessage(messages, signal) {
   const endpoint = `${getChatApiUrl()}/api/chat`;
-
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await attemptChat(endpoint, messages, signal);
-    } catch (error) {
-      const canRetry =
-        attempt < RETRY_DELAYS.length && isRetryable(error) && !signal?.aborted;
-
-      if (!canRetry) {
-        throw error;
-      }
-
-      onRetry?.(attempt + 1);
-      await wait(RETRY_DELAYS[attempt], signal);
-    }
-  }
+  return attemptChat(endpoint, messages, signal);
 }

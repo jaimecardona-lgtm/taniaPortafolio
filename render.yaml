@@ -36,10 +36,10 @@ services:
         value: Tania Pelaez Valverde Portfolio
 
       - key: CHAT_PRIMARY_LLM
-        value: google/gemini-3.1-flash-lite
+        value: nvidia/nemotron-3.5-lightning:free
 
       - key: CHAT_FALLBACK_LLM
-        value: google/gemini-3.7-flash
+        value: openrouter/free
 
       - key: CHAT_USE_FALLBACK
         value: "true"

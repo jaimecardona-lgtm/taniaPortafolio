@@ -8,15 +8,21 @@ from app.models.chat import ChatMessage
 
 logger = logging.getLogger(__name__)
 
-# Razonamiento mínimo y excluido de la respuesta visible.
+# Razonamiento desactivado y, por seguridad, excluido de la respuesta.
 # Solo se lee message.content; el campo reasoning nunca se retorna.
-REASONING_CONFIG = {"effort": "minimal", "exclude": True}
+REASONING_CONFIG = {"effort": "none", "exclude": True}
 
-# Errores que justifican intentar el modelo fallback
-RECOVERABLE_STATUSES = (429, 500, 502, 503, 504)
+# Fallos reales del proveedor: sí justifican una request al fallback.
+# 429 NO está aquí: ambos modelos gratuitos comparten la cuenta y su límite.
+RECOVERABLE_STATUSES = (500, 502, 503, 504)
 
-# Errores que no se reintentan: la solicitud en sí es inválida o no autorizada
-NON_RECOVERABLE_STATUSES = (400, 401, 403)
+
+class RateLimitError(Exception):
+    """OpenRouter devolvió 429. No se hace fallback ni reintento."""
+
+
+class ProviderError(Exception):
+    """Error que no debe reintentarse ni derivar a fallback (400, 401, 402, 403, etc.)."""
 
 
 class OpenRouterService:
@@ -80,7 +86,7 @@ class OpenRouterService:
                 raise ConnectionError(str(e))
 
     def _extract_content(self, data: dict, model: str) -> str:
-        """Extrae únicamente message.content; cualquier otra cosa es recuperable"""
+        """Extrae únicamente message.content; respuesta vacía se trata como fallo real"""
         choices = data.get("choices") or []
         if not choices:
             logger.error(f"No choices in OpenRouter response for {model}")
@@ -95,22 +101,23 @@ class OpenRouterService:
 
     def _handle_error(self, response: httpx.Response, model: str) -> None:
         """
-        Convierte un error HTTP en excepción.
-        - 400/401/403: ValueError (no se reintenta ni se usa fallback).
-        - Cualquier otro: ConnectionError, que chat() usa para activar el fallback.
+        Clasifica un error HTTP:
+        - 429: RateLimitError (sin fallback)
+        - 500/502/503/504: ConnectionError (fallback permitido)
+        - cualquier otro (400, 401, 402, 403, ...): ProviderError (sin fallback)
         """
         status = response.status_code
 
-        if status in NON_RECOVERABLE_STATUSES:
-            logger.error(f"OpenRouter {status}: {response.text}")
-            raise ValueError(f"OpenRouter error: {response.text[:200]}")
+        if status == 429:
+            logger.warning(f"OpenRouter 429 from {model}; rate limit, no fallback")
+            raise RateLimitError("Límite de solicitudes de OpenRouter alcanzado")
 
         if status in RECOVERABLE_STATUSES:
             logger.warning(f"OpenRouter {status} from {model}")
-        else:
-            logger.error(f"OpenRouter {status} from {model}: {response.text[:300]}")
+            raise ConnectionError(f"OpenRouter error {status}")
 
-        raise ConnectionError(f"OpenRouter error {status}")
+        logger.error(f"OpenRouter {status} from {model}: {response.text[:300]}")
+        raise ProviderError(f"OpenRouter error {status}")
 
     async def chat(
         self,
@@ -118,9 +125,8 @@ class OpenRouterService:
         messages: list[ChatMessage],
     ) -> str:
         """
-        Chat con fallback automático.
-        Intenta modelo primario; si falla recuperablemente y está habilitado,
-        intenta modelo fallback.
+        Como máximo 2 requests por mensaje: 1 primary y, solo ante fallo real
+        (timeout, conexión o 5xx), 1 fallback. 429 y errores de cliente no hacen fallback.
         """
         try:
             return await self.call_model(self.primary_model, system_prompt, messages)
@@ -138,6 +144,8 @@ class OpenRouterService:
                 return await self.call_model(
                     self.fallback_model, system_prompt, messages
                 )
+            except (RateLimitError, ProviderError):
+                raise
             except Exception as fallback_error:
                 logger.error(f"Fallback model also failed: {fallback_error}")
                 raise ConnectionError(
