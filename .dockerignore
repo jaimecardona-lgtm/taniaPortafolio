@@ -1,0 +1,26 @@
+# Control de versiones y herramientas locales
+.git
+.github
+.claude
+**/.claude
+
+# Secretos: nunca dentro de la imagen
+**/.env
+**/.env.*
+!**/.env.example
+
+# Dependencias y builds locales (el build se hace dentro de la imagen)
+**/node_modules
+**/dist
+
+# Cache y temporales de Python
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.coverage
+*.log
+
+# Documentación (no se sirve ni se ejecuta)
+docs
+
+# Nota: portafolio-react/public NO se excluye: contiene imágenes, videos, PDF y avatar.

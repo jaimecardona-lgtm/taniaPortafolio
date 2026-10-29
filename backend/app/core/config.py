@@ -1,3 +1,5 @@
+import os
+
 from pydantic_settings import BaseSettings
 from typing import Optional
 
@@ -8,7 +10,8 @@ class Settings(BaseSettings):
     # OpenRouter
     openrouter_api_key: str
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_site_url: str = "https://taniaportafolio.onrender.com"
+    # Vacío = se resuelve en model_post_init (RENDER_EXTERNAL_URL o localhost)
+    openrouter_site_url: str = ""
     openrouter_site_name: str = "Tania Peláez Valverde Portfolio"
 
     # Chat LLM
@@ -22,8 +25,13 @@ class Settings(BaseSettings):
     chat_max_tokens: int = 450
     chat_timeout_ms: int = 45000
 
-    # CORS
-    allowed_origins: str = "http://localhost:5173,https://taniaportafolio.onrender.com"
+    # CORS (en producción el frontend es same-origin; esto solo afecta desarrollo separado)
+    allowed_origins: str = "http://localhost:5173,http://localhost:10000"
+
+    def model_post_init(self, __context) -> None:
+        # Referer de OpenRouter: OPENROUTER_SITE_URL > URL pública de Render > local
+        if not self.openrouter_site_url:
+            self.openrouter_site_url = os.getenv("RENDER_EXTERNAL_URL") or "http://localhost:10000"
 
     class Config:
         env_file = ".env"

@@ -1,119 +1,59 @@
-# ⚡ Despliegue rápido (5 minutos)
+# ⚡ Despliegue rápido en Render (Docker)
+
+Un único Web Service Docker: Nginx público + React compilado + FastAPI interno.
 
 ## Requisitos previos
 
-- Node.js >= 18
-- Cuenta Cloudflare (gratis)
-- API key OpenRouter
+- Cuenta en Render
+- API key de OpenRouter (https://openrouter.ai/keys)
+- Repositorio conectado a Render
 
 ---
 
-## 1️⃣ Instalar Wrangler (1 min)
+## 1️⃣ Crear el servicio desde el Blueprint (2 min)
+
+1. En https://dashboard.render.com: **New → Blueprint**
+2. Selecciona el repositorio. Render lee `render.yaml` y crea el servicio `tania-portafolio` (runtime Docker, plan Free).
+
+> Antes de sincronizar, revisa la sección de migración en `docs/assistant-deploy.md`.
+
+---
+
+## 2️⃣ Configurar la API key (1 min)
+
+En el servicio, **Environment**:
+
+- **Key:** `OPENROUTER_API_KEY`
+- **Value:** tu API key (no la subas al repositorio)
+
+---
+
+## 3️⃣ Desplegar (5–10 min la primera vez)
+
+Render construye el `Dockerfile` de la raíz y espera a que `/api/health` responda.
+
+---
+
+## ✅ Verificar
 
 ```bash
-npm install -g wrangler
-wrangler --version  # Verifica que está instalado
+curl https://<tu-servicio>.onrender.com/api/health
 ```
+
+Debe responder: `{"status":"ok","service":"tania-portfolio-api"}`
+
+Luego abre la URL del sitio, usa el botón flotante del asistente y haz una pregunta.
 
 ---
 
-## 2️⃣ Autenticarse en Cloudflare (1 min)
-
-```bash
-wrangler login
-```
-
-Se abrirá navegador → autorizar → volver a terminal
-
----
-
-## 3️⃣ Guardar API key (1 min)
-
-```bash
-cd openrouter-worker
-wrangler secret put OPENROUTER_API_KEY
-```
-
-Pega tu API key (de https://openrouter.ai/keys) cuando se pida. Presiona Enter.
-
----
-
-## 4️⃣ Desplegar (1 min)
-
-```bash
-wrangler deploy
-```
-
-Anota la URL que aparece:
-```
-✓ Uploaded tania-portfolio-assistant
-https://tania-portfolio-assistant.workers.dev
-```
-
-**Tu URL:** `https://tania-portfolio-assistant.workers.dev`
-
----
-
-## 5️⃣ Configurar Render (1 min)
-
-1. Ir a https://render.com/dashboard
-2. Seleccionar sitio `tania-portafolio`
-3. **Settings → Environment**
-4. Agregar variable:
-   - **Key:** `VITE_CHAT_API_URL`
-   - **Value:** `https://tania-portfolio-assistant.workers.dev/chat`
-   (cambia el nombre del Worker si es diferente)
-
-5. **Deployments → Trigger Deploy**
-
----
-
-## ✅ Listo
-
-El asistente debería estar funcionando en ~2 minutos después del redeploy.
-
----
-
-## 🧪 Verificar que funciona
-
-### Test rápido del Worker
-
-```bash
-curl https://tania-portfolio-assistant.workers.dev/health
-```
-
-Debería responder: `{"status":"ok"}`
-
-### Test en el navegador
-
-1. Ir a tu sitio en Render
-2. Ver botón flotante en esquina inferior derecha
-3. Haz clic
-4. Escribe: "¿Quién es Tania?"
-5. Verifica que responde sobre Tania
-
----
-
-## ❌ Algo salió mal?
+## ❌ Algo salió mal
 
 | Problema | Solución |
 |----------|----------|
-| Error "401" | API key incorrecta. Prueba: `wrangler secret put OPENROUTER_API_KEY` |
-| Botón no aparece | `VITE_CHAT_API_URL` no en Render. Verifica y redeploy. |
-| "No responde" | Cloudflare en caché. Espera 30 segundos y recarga. |
+| Deploy falla en health check | Revisa los logs del servicio en Render. Suele ser `OPENROUTER_API_KEY` ausente. |
+| Asistente responde con error de servicio | Revisa logs; si es 429, el límite del proveedor se alcanzó: espera unos minutos. |
+| Videos no cargan | Verifica en el navegador que la petición del video devuelva `206`. |
 
 ---
 
-## 🔐 Restringir CORS (después, en producción)
-
-Una vez que todo funciona:
-
-```bash
-wrangler secret put ALLOWED_ORIGIN
-```
-
-Pega tu URL de Render (ej: `https://tania-portafolio-xxx.onrender.com`)
-
----
-
-**Tiempo total:** ~5 minutos ⚡
+**Desarrollo local:** `docker compose up -d` y abre http://localhost:10000.

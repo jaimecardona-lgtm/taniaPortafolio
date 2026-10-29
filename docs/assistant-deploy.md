@@ -1,364 +1,142 @@
-# Despliegue del Asistente Conversacional
+# Despliegue del Portafolio y Asistente en Render
 
-Este documento explica cómo desplegar el Cloudflare Worker que actúa como gateway seguro hacia OpenRouter.
+Este documento describe el despliegue actual: **un único Web Service Docker** en Render.
 
-## Arquitectura general
+## Arquitectura
 
 ```
-Frontend (React/Vite)
-  → solicita /chat al Worker
-  → Cloudflare Worker (openrouter-worker/)
-    → valida y limita requests
-    → llama a OpenRouter con API key protegida
-    → responde al frontend
+Internet
+  ↓
+Nginx (único proceso público, escucha en $PORT)
+  ├── /*      → React compilado (estático)
+  └── /api/*  → FastAPI / Uvicorn (127.0.0.1:8000, interno)
+                  ↓
+                OpenRouter API
 ```
 
-**Importante:** La API key de OpenRouter NUNCA sale del Worker. El frontend solo conoce la URL pública del Worker.
+- `Dockerfile` (raíz): build multi-stage. Stage 1 compila el frontend con Node 22; stage 2 es Python 3.11 con Nginx y Supervisor, y copia el `dist` compilado.
+- `deploy/start.sh`: genera la config de Nginx con `$PORT` y arranca Supervisor.
+- `deploy/supervisord.conf`: administra uvicorn (FastAPI) y Nginx.
+- `deploy/nginx.conf.template`: rutas SPA, `/api/*` hacia FastAPI, videos servidos por Nginx con soporte de Range.
+- El frontend usa rutas relativas (`/api/chat`, `/api/health`), así que en producción es mismo origen y no requiere CORS.
 
 ---
 
 ## Requisitos previos
 
-- Cuenta en [Cloudflare](https://cloudflare.com) (gratuita)
-- Cuenta en [OpenRouter](https://openrouter.ai)
-- API key de OpenRouter generada
-- Node.js >= 18
-- Wrangler CLI instalado globalmente
+- Cuenta en [Render](https://render.com)
+- Cuenta en [OpenRouter](https://openrouter.ai) con API key generada
+- Para pruebas locales: Docker Desktop
 
 ---
 
-## Paso 1: Instalar Wrangler CLI
+## Paso 1: Variables de entorno en Render
+
+Definidas en `render.yaml` (Blueprint):
+
+| Variable | Valor |
+|---|---|
+| `OPENROUTER_API_KEY` | **Secreta**. Se configura en el dashboard (`sync: false`). Nunca en el repositorio. |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` |
+| `OPENROUTER_SITE_NAME` | `Tania Pelaez Valverde Portfolio` |
+| `CHAT_PRIMARY_LLM` | `nvidia/nemotron-3.5-lightning:free` |
+| `CHAT_FALLBACK_LLM` | `openrouter/free` |
+| `CHAT_USE_FALLBACK` | `true` |
+| `CHAT_TEMPERATURE` | `0.2` |
+| `CHAT_TOP_P` | `0.8` |
+| `CHAT_MAX_TOKENS` | `450` |
+| `CHAT_TIMEOUT_MS` | `45000` |
+
+`OPENROUTER_SITE_URL` no se declara: el backend usa `RENDER_EXTERNAL_URL` (inyectada por Render) como referer. `VITE_CHAT_API_URL` no se declara: el frontend es mismo origen.
+
+---
+
+## Paso 2: Crear o sincronizar el servicio
+
+1. En Render Dashboard: **New → Blueprint** y selecciona el repositorio.
+2. Render lee `render.yaml` y crea un servicio Web (`tania-portafolio`) con:
+   - `runtime: docker`
+   - `dockerfilePath: ./Dockerfile`
+   - `dockerContext: .`
+   - `healthCheckPath: /api/health`
+3. Define `OPENROUTER_API_KEY` en **Environment**.
+4. Espera al primer deploy.
+
+### Migración desde la arquitectura anterior (dos servicios)
+
+Antes de sincronizar el Blueprint, revisa en el Dashboard:
+
+- Si existe el **Static Site** `tania-portafolio` y el **Web Service** `tania-portafolio-api` de la arquitectura anterior, un Blueprint no cambia el runtime de un servicio existente de forma fiable. Verifica el resultado antes de confirmar.
+- El dominio `taniaportafolio.onrender.com` pertenece hoy al Static Site. Decide si el nuevo servicio usará ese dominio (eliminando o renombrando antes el Static Site) o una URL nueva.
+- Elimina `tania-portafolio-api` solo cuando el nuevo servicio esté verificado.
+
+---
+
+## Paso 3: Verificar el despliegue
 
 ```bash
-npm install -g wrangler
-```
+BASE=https://<tu-servicio>.onrender.com
 
-Verifica la instalación:
-
-```bash
-wrangler --version
+curl -i $BASE/api/health                       # 200, {"status":"ok",...}
+curl -I $BASE/empresa                          # 200 (SPA)
+curl -I $BASE/experiencia                      # 200 (SPA)
+curl -I $BASE/portafolio                       # 200 (SPA)
+curl -i -H "Range: bytes=0-1023" $BASE/elecciones/video4.mp4   # 206 Partial Content
 ```
 
 ---
 
-## Paso 2: Autenticarse en Cloudflare
+## Desarrollo local
+
+### Con Docker (igual que producción)
+
+Crea `backend/.env` a partir de `backend/.env.example` y añade tu API key localmente.
 
 ```bash
-wrangler login
+docker compose build
+docker compose up -d
+docker compose ps                                 # "healthy"
+curl http://localhost:10000/api/health
 ```
 
-Se abrirá tu navegador para autorizar la aplicación CLI. Completa el flujo de autenticación.
+Abre http://localhost:10000. Para detener: `docker compose down`.
 
----
+`docker-compose.yml` solo sirve para desarrollo y verificación local. Render no lo utiliza.
 
-## Paso 3: Configurar el Worker
-
-### 3.1 Navega a la carpeta del Worker
+### Frontend y backend separados
 
 ```bash
-cd openrouter-worker
+# Backend
+cd backend
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# Frontend, con VITE_CHAT_API_URL=http://localhost:8000 en portafolio-react/.env
+cd portafolio-react
+npm run dev
 ```
-
-### 3.2 Revisa `wrangler.toml`
-
-El archivo ya contiene la configuración básica:
-
-```toml
-name = "tania-portfolio-assistant"
-main = "src/index.js"
-compatibility_date = "2024-01-01"
-
-[vars]
-ALLOWED_ORIGIN = "*"
-OPENROUTER_MODEL = "google/gemini-2.5-flash-lite"
-OPENROUTER_SITE_URL = "https://taniaportafolio.vercel.app"
-OPENROUTER_SITE_NAME = "Tania Peláez Valverde Portfolio"
-```
-
-Puedes ajustar:
-- `OPENROUTER_MODEL` - modelo a usar (consulta OpenRouter para opciones)
-- `OPENROUTER_SITE_URL` - URL de tu portafolio
-- `OPENROUTER_SITE_NAME` - nombre del sitio
-- `ALLOWED_ORIGIN` - restringir CORS (inicialmente `*` para pruebas; después especifica el dominio de Render)
-
----
-
-## Paso 4: Configurar la API key como secret
-
-El secret debe guardarse de forma segura y no aparecer en archivos de configuración.
-
-### 4.1 Crear o actualizar el secret
-
-```bash
-wrangler secret put OPENROUTER_API_KEY
-```
-
-El sistema te pedirá que pegues la API key. Hazlo:
-
-1. Obtén tu API key de [OpenRouter Dashboard](https://openrouter.ai/keys)
-2. Pégala en el prompt de Wrangler
-3. Presiona Enter
-
-**Importante:** No incluyas la API key en `wrangler.toml` ni en ningún archivo. Los secrets se almacenan de forma segura en Cloudflare.
-
-### 4.2 Verificar el secret (sin ver el valor)
-
-```bash
-wrangler secret list
-```
-
-Debería listar `OPENROUTER_API_KEY` como "redacted".
-
----
-
-## Paso 5: Desplegar el Worker
-
-### Opción A: Desplegar en un subdominio de workers.dev
-
-```bash
-wrangler deploy
-```
-
-Cloudflare asignará automáticamente una URL como:
-```
-https://tania-portfolio-assistant.workers.dev
-```
-
-Anota esta URL — la necesitarás en el siguiente paso.
-
-### Opción B: Desplegar en un dominio personalizado (opcional)
-
-Si usas un dominio personalizado con Cloudflare:
-
-1. Edita `wrangler.toml` y añade:
-   ```toml
-   route = "mi-dominio.com/chat/*"
-   zone_id = "TU_ZONE_ID"
-   ```
-
-2. Obtén tu `zone_id` de Cloudflare Dashboard → Sitio → Overview (derecha, copiar Zone ID)
-
-3. Despliega:
-   ```bash
-   wrangler deploy
-   ```
-
----
-
-## Paso 6: Probar el Worker
-
-### Prueba básica (health check)
-
-```bash
-curl https://your-worker-url.workers.dev/health
-```
-
-Debería responder:
-```json
-{"status": "ok"}
-```
-
-### Prueba de chat
-
-```bash
-curl -X POST https://your-worker-url.workers.dev/chat \
-  -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "Hola"}]}'
-```
-
-Debería responder con un objeto JSON:
-```json
-{
-  "role": "assistant",
-  "content": "Hola 👋 Soy el asistente..."
-}
-```
-
-Si obtienes errores de autenticación, verifica que el secret se haya guardado correctamente.
-
----
-
-## Paso 7: Configurar Render (Frontend)
-
-### 7.1 Crear o localizar tu variable de entorno en Render
-
-1. Ve a [Render Dashboard](https://render.com)
-2. Selecciona tu Static Site (`tania-portafolio`)
-3. Navega a **Settings** → **Environment**
-4. Crea o actualiza una variable:
-   - **Key:** `VITE_CHAT_API_URL`
-   - **Value:** `https://your-worker-url.workers.dev/chat`
-
-### 7.2 Re-desplegar el Static Site
-
-1. Ve a **Deployments**
-2. Haz clic en **Trigger Deploy** (redeploy)
-3. Espera a que compile. El build debe incluir la nueva variable de entorno.
-
----
-
-## Paso 8: Restricción de CORS (producción)
-
-Una vez que el frontend está en producción, restringe CORS para mejorar seguridad:
-
-### 8.1 Obten la URL de tu sitio en Render
-
-Por ejemplo: `https://tania-portafolio-hqio.onrender.com`
-
-### 8.2 Actualiza el secret `ALLOWED_ORIGIN`
-
-```bash
-wrangler secret put ALLOWED_ORIGIN
-```
-
-Pega la URL de tu sitio (sin `/` al final):
-```
-https://tania-portafolio-hqio.onrender.com
-```
-
-### 8.3 Redeploy del Worker
-
-```bash
-wrangler deploy
-```
-
-Ahora solo las solicitudes desde tu dominio serán aceptadas.
 
 ---
 
 ## Solución de problemas
 
-### Error: "OPENROUTER_API_KEY not configured"
+### El deploy falla en el health check
+- Revisa los logs del servicio en Render.
+- Causa habitual: `OPENROUTER_API_KEY` no definida. El backend no arranca y `/api/health` no responde.
 
-**Causa:** El secret no se guardó correctamente.
+### `/api/chat` responde 429
+- Límite del proveedor OpenRouter. El backend no reintenta; el usuario puede volver a intentar más tarde.
 
-**Solución:**
-```bash
-wrangler secret put OPENROUTER_API_KEY
-# Pega la API key cuando se solicite
-wrangler deploy
-```
+### Videos no reproducen
+- Verifica que la respuesta incluya `206 Partial Content` con `Range`.
 
----
-
-### Error: "401 Unauthorized" desde el frontend
-
-**Causa:** La API key no es válida o expiró.
-
-**Solución:**
-1. Verifica que tu API key es correcta en [OpenRouter](https://openrouter.ai/keys)
-2. Actualiza el secret:
-   ```bash
-   wrangler secret put OPENROUTER_API_KEY
-   ```
-3. Redeploy:
-   ```bash
-   wrangler deploy
-   ```
-
----
-
-### Error: "CORS blocked"
-
-**Causa:** El origen del request no coincide con `ALLOWED_ORIGIN`.
-
-**Solución:**
-- Para desarrollo local, usa `ALLOWED_ORIGIN = "*"` en `wrangler.toml`
-- Para producción, asegúrate de que `ALLOWED_ORIGIN` sea exactamente la URL de tu sitio en Render (sin trailing slash)
-
----
-
-### El asistente no aparece en el frontend
-
-**Causa:** `VITE_CHAT_API_URL` no está configurada o es incorrecta.
-
-**Solución:**
-1. Verifica en Render → Settings → Environment que `VITE_CHAT_API_URL` está presente
-2. Verifica que el valor sea exactamente tu URL del Worker (incluyendo `/chat`)
-3. Re-despliega el Static Site en Render
-
----
-
-## Monitoreo y logs
-
-### Ver logs del Worker
-
-```bash
-wrangler tail
-```
-
-Esto abrirá un stream en vivo de logs. Haz solicitudes desde el frontend para ver qué sucede.
-
-### Ver logs en Cloudflare Dashboard
-
-1. Ve a Cloudflare Dashboard → Workers → tania-portfolio-assistant
-2. Navega a **Logs**
-3. Verás las últimas solicitudes y respuestas
-
----
-
-## Actualizar el Worker
-
-Si haces cambios al código del Worker:
-
-1. Edita los archivos en `openrouter-worker/src/`
-2. Redeploy:
-   ```bash
-   wrangler deploy
-   ```
-
-No necesitas actualizar el frontend a menos que cambien las rutas o formato de respuesta.
-
----
-
-## Eliminar o deshabilitar el Worker
-
-### Pausar (deshabilitar sin borrar)
-
-```bash
-wrangler deployments list
-```
-
-Puedes pausar desde el Dashboard, pero es más fácil simplemente no actualizar la variable `VITE_CHAT_API_URL` en Render.
-
-### Eliminar completamente
-
-```bash
-wrangler delete tania-portfolio-assistant
-```
-
-Después, elimina el repositorio `openrouter-worker/` o simplemente no lo despliegues.
-
----
-
-## Costos
-
-- **Cloudflare Workers:** Gratis hasta 100,000 solicitudes/día
-- **OpenRouter:** Pago por token según el modelo usado
-  - Modelo recomendado (`google/gemini-2.5-flash-lite`): ~$0.00001 por token de entrada
-
-Para estimar costos, consulta el [pricing de OpenRouter](https://openrouter.ai/pricing).
+### La página en una ruta profunda devuelve 404
+- Las rutas SPA caen en `index.html` desde Nginx. Si ocurre, revisa `deploy/nginx.conf.template`.
 
 ---
 
 ## Seguridad
 
-✅ **Lo que está protegido:**
-- API key nunca se expone al navegador
-- Validación de requests en el servidor
-- CORS restringido en producción
-- Protección contra prompt injection
-- Límites de tasa (máximo de solicitudes)
-
-⚠️ **Monitorea:**
-- Logs del Worker para solicitudes anómalas
-- Uso de tokens en OpenRouter (cambios drásticos indican abuso)
-- IP addresses que generan muchas solicitudes
-
----
-
-## Referencias
-
-- [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)
-- [Wrangler CLI Reference](https://developers.cloudflare.com/workers/cli-wrangler/)
-- [OpenRouter API Documentation](https://openrouter.ai/docs)
+- La API key de OpenRouter vive solo en variables de entorno de runtime. No está en el repositorio, en el `Dockerfile`, ni en la imagen.
+- `backend/.env` está ignorado por Git y excluido de la imagen (`.dockerignore`).
+- `.claude/`, `.git/` y `node_modules/` están excluidos del contexto Docker.
+- Revisa logs en Render y el uso de tokens en OpenRouter para detectar abuso.

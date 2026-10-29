@@ -6,30 +6,62 @@ Portafolio profesional de Tania Peláez Valverde con asistente conversacional in
 
 - `portafolio-react/` — sitio principal (Vite + React + React Router) con asistente integrado.
   - `src/features/assistant/` — componentes y lógica del asistente conversacional.
-- `openrouter-worker/` — Cloudflare Worker que actúa como gateway seguro a OpenRouter (protege la API key).
-- `docs/` — documentación adicional (deploy del Worker, etc.).
+- `backend/` — API FastAPI del asistente (`/api/health`, `/api/chat`) que llama a OpenRouter.
+- `deploy/` — configuración de Nginx, Supervisor y script de inicio del contenedor.
+- `Dockerfile` — imagen única de producción (frontend compilado + backend + Nginx + Supervisor).
+- `docker-compose.yml` — ejecución local de la misma imagen que se despliega en Render.
+- `docs/` — guía de despliegue (`docs/assistant-deploy.md`).
 
-## Arquitectura del asistente
+## Arquitectura
+
+Se despliega como **un único Web Service Docker** en Render. Dentro del contenedor, React y FastAPI siguen separados:
 
 ```
-Frontend (React en Render)
-  ↓ VITE_CHAT_API_URL (variable de entorno)
+Internet
   ↓
-Cloudflare Worker (openrouter-worker)
-  ✓ Valida requests
-  ✓ Inyecta system prompt
-  ✓ Protege API key de OpenRouter
-  ↓
-OpenRouter API
-  ↓
-Respuesta al frontend
+Nginx (único proceso público, escucha en $PORT)
+  ├── /*      → React compilado (index.html + assets, videos, PDF e imágenes)
+  └── /api/*  → FastAPI / Uvicorn (interno, 127.0.0.1:8000)
+                  ↓
+                OpenRouter API
 ```
 
-**Importante:** La API key de OpenRouter se almacena de forma segura en el Worker (secreto de Cloudflare). El frontend NUNCA la ve.
+- Supervisor administra Nginx y FastAPI dentro del contenedor.
+- El frontend usa rutas relativas (`/api/chat`, `/api/health`): en producción es mismo origen, sin CORS.
+- La API key de OpenRouter solo existe en runtime (variable de entorno). Nunca entra al repositorio ni a la imagen.
 
 ## Desarrollo local
 
-### Frontend
+### Opción A: contenedor (igual que producción)
+
+Requiere Docker Desktop y un archivo `backend/.env` (copia de `backend/.env.example` con tu API key).
+
+```bash
+docker compose build
+docker compose up -d
+docker compose ps        # el servicio debe quedar "healthy"
+```
+
+- Sitio: http://localhost:10000
+- Health: http://localhost:10000/api/health
+
+Para detenerlo: `docker compose down`.
+
+### Opción B: frontend y backend separados (desarrollo con recarga)
+
+Backend:
+
+```bash
+cd backend
+pip install -r requirements.txt
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Frontend (en otra terminal), con `portafolio-react/.env`:
+
+```
+VITE_CHAT_API_URL=http://localhost:8000
+```
 
 ```bash
 cd portafolio-react
@@ -37,85 +69,58 @@ npm install
 npm run dev
 ```
 
-Abre http://localhost:5173
-
-### Worker (opcional, para desarrollo local del asistente)
-
-```bash
-cd openrouter-worker
-npm install
-wrangler dev
-```
-
-El Worker correrá en http://localhost:8787
+Abre http://localhost:5173. Sin `VITE_CHAT_API_URL` el frontend usa mismo origen (`/api/*`), que en `npm run dev` no existe; por eso esta variable es necesaria en este modo.
 
 ## Variables de entorno
+
+### Backend (`backend/.env` en local, Environment en Render)
+
+Copia `backend/.env.example` como `backend/.env`. Nunca subas `backend/.env` al repositorio.
+
+| Variable | Descripción |
+|---|---|
+| `OPENROUTER_API_KEY` | API key de OpenRouter. **Secreta**: solo en `.env` local o en el dashboard de Render. |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` |
+| `OPENROUTER_SITE_URL` | Opcional. Referer de OpenRouter. Si está vacío: `RENDER_EXTERNAL_URL` (en Render) o `http://localhost:10000` (local). |
+| `OPENROUTER_SITE_NAME` | Nombre del sitio para OpenRouter. |
+| `CHAT_PRIMARY_LLM` / `CHAT_FALLBACK_LLM` / `CHAT_USE_FALLBACK` | Modelo principal, fallback y si se usa fallback. |
+| `CHAT_TEMPERATURE`, `CHAT_TOP_P`, `CHAT_MAX_TOKENS`, `CHAT_TIMEOUT_MS` | Parámetros de generación. |
+| `ALLOWED_ORIGINS` | Orígenes CORS. Solo importa en desarrollo con frontend separado. |
 
 ### Frontend (`portafolio-react/.env`)
 
 ```
-VITE_CHAT_API_URL=https://your-worker.workers.dev/chat
+# Opcional. Vacío = mismo origen (/api/*). Solo necesario con frontend y backend separados.
+VITE_CHAT_API_URL=
 ```
 
-Ejemplo: `https://tania-portfolio-assistant.workers.dev/chat`
-
-**Nota:** Esta variable NO contiene API keys. Es completamente segura estar en el navegador.
-
-### Worker (Cloudflare secrets)
-
-```
-OPENROUTER_API_KEY=sk-or-...
-ALLOWED_ORIGIN=https://taniaportafolio-xxx.onrender.com (producción)
-```
-
-Ver `docs/assistant-deploy.md` para instrucciones detalladas de configuración.
+Esta variable no contiene secretos.
 
 ## Despliegue en Render
 
-El repo incluye `render.yaml` (Blueprint de Render):
+Producción usa el `Dockerfile` de la raíz. Render construye la imagen y levanta un único servicio.
 
-1. En Render Dashboard: **New → Blueprint** y conecta este repositorio.
-2. Render crea un Static Site que:
-   - Construye desde `portafolio-react/` con `npm install && npm run build`
-   - Publica `dist/`
-   - Reescribe rutas (`/empresa`, `/experiencia`, `/portafolio`) a `index.html` para React Router
+1. En Render Dashboard: **New → Blueprint** y conecta el repositorio (usa `render.yaml`).
+2. En el servicio, **Environment**, define `OPENROUTER_API_KEY` (el Blueprint la marca con `sync: false`, así que Render te la pedirá).
+3. Render comprueba `GET /api/health` antes de dar por buena cada versión.
 
-3. **Agregar variable de entorno:**
-   - Luego de crear el sitio, ve a **Settings → Environment**
-   - Agrega: `VITE_CHAT_API_URL=https://your-worker.workers.dev/chat`
-   - Haz redeploy
+Notas:
+- El Blueprint declara `runtime: docker`, `dockerfilePath: ./Dockerfile`, `dockerContext: .` y `healthCheckPath: /api/health`.
+- No se configura `VITE_CHAT_API_URL` en Render: el frontend es mismo origen.
+- Antes de sincronizar un Blueprint sobre un servicio que ya existe, revisa `docs/assistant-deploy.md` (sección de migración).
 
-4. Cada push a `main` redeploya automáticamente.
-
-Si prefieres configuración manual (**New → Static Site**):
-
-| Campo | Valor |
-|---|---|
-| Root Directory | `portafolio-react` |
-| Build Command | `npm install && npm run build` |
-| Publish Directory | `dist` |
-| Rewrite rule | `/*` → `/index.html` |
-| Environment variable | `VITE_CHAT_API_URL` = tu URL del Worker |
-
-## Despliegue del Worker
-
-Ver `docs/assistant-deploy.md` para instrucciones completas:
-
-1. Instalar Wrangler CLI
-2. Autenticarse en Cloudflare
-3. Configurar API key como secret
-4. Desplegar con `wrangler deploy`
-5. Copiar URL y actualizar `VITE_CHAT_API_URL` en Render
-
-Resumen rápido:
+## Build y validación
 
 ```bash
-cd openrouter-worker
-npm install -g wrangler
-wrangler login
-wrangler secret put OPENROUTER_API_KEY  # Pega tu API key
-wrangler deploy
-# Copia la URL → Configura en Render → Redeploy
+# Frontend
+cd portafolio-react
+npm ci
+npm run build
+
+# Imagen completa
+cd ..
+docker compose config --quiet   # valida docker-compose.yml sin imprimir variables
+docker compose build
 ```
 
 ## Componentes del asistente
@@ -124,28 +129,17 @@ wrangler deploy
 
 - `AssistantWidget.jsx` — Widget principal (botón flotante + panel de chat)
 - `useAssistantChat.js` — Hook que maneja estado de conversación
-- `chatClient.js` — Cliente centralizado para llamadas al Worker
+- `chatClient.js` — Cliente centralizado para `/api/chat` y `/api/health`
 - `AssistantWidget.module.css` — Estilos (usa paleta de colores del portafolio)
 
-### Worker
+### Backend
 
-- `src/index.js` — Endpoint `/chat` con validación y límites de seguridad
-- `src/systemPrompt.js` — System prompt completo (conocimiento del asistente)
-- `wrangler.toml` — Configuración de Cloudflare
+- `app/main.py` — Endpoints `/api/health` y `/api/chat`, CORS y mapeo de errores
+- `app/services/openrouter.py` — Cliente de OpenRouter con modelo principal y fallback controlado
+- `app/services/response_guard.py` — Limpieza local de la respuesta (sin llamadas extra al modelo)
+- `app/prompts/tania.py` — System prompt del asistente
 
-## Build y validación
-
-```bash
-# Desde portafolio-react
-npm install
-npm run build
-
-# Verificar que no hay errores de compilación
-```
-
-El build debe completarse sin errores. Si ocurren errores de importación, verifica que `AssistantWidget.jsx` y sus dependencias están en las rutas correctas.
-
-## Características del asistente
+## Características
 
 ✅ Botón flotante elegante en esquina inferior derecha
 ✅ Panel conversacional integrado con identidad visual del portafolio
@@ -179,32 +173,25 @@ Responde sobre:
 ## Seguridad
 
 🔒 **Lo que está protegido:**
-- API key nunca llega al navegador (vive en el Worker)
+- La API key de OpenRouter nunca llega al navegador ni a la imagen Docker (solo existe en runtime)
 - Validación de requests en servidor (no solo frontend)
-- CORS restringido en producción
-- Límites de mensajes, longitud, tokens
-- Timeouts y protección contra prompt injection
+- Errores 429 y de cliente (400/401/402/403) no hacen fallback; solo fallos reales del proveedor
+- Límites de mensajes, longitud, tokens y timeouts
 
 ⚠️ **Monitorear:**
-- Logs del Worker para activity anómala
+- Logs del contenedor en Render para actividad anómala
 - Uso de tokens en OpenRouter (cambios bruscos = abuso)
-- Rate de solicitudes
 
 ## Troubleshooting
 
-**El asistente no aparece:**
-- Verifica `VITE_CHAT_API_URL` en Render environment variables
-- Verifica que la URL es correcta y accesible
-- Redeploy el sitio
+**`docker compose ps` muestra "unhealthy" o "starting" por mucho tiempo:**
+- Revisa `docker compose logs tania-app`
+- Si falta `OPENROUTER_API_KEY` en `backend/.env`, el backend no arranca (Supervisor lo reintenta; Nginx sigue sirviendo el sitio).
 
-**Error "configuración incorrecta":**
-- Verifica que el Worker está desplegado
-- Verifica que el secret `OPENROUTER_API_KEY` está guardado
-- Prueba: `curl https://your-worker.workers.dev/health`
+**El asistente no responde en local con `npm run dev`:**
+- Verifica que `portafolio-react/.env` tenga `VITE_CHAT_API_URL=http://localhost:8000` y que uvicorn esté corriendo en el puerto 8000.
 
-**"Demasiadas solicitudes":**
-- Espera un momento (rate limiting)
-- Limpia la conversación
-- Recarga la página
+**"Tania está recibiendo muchas consultas":**
+- Es el límite del proveedor (429). Espera unos minutos; el servidor no reintenta automáticamente.
 
-Ver `docs/assistant-deploy.md` para troubleshooting más detallado.
+Ver `docs/assistant-deploy.md` para el despliegue completo en Render.

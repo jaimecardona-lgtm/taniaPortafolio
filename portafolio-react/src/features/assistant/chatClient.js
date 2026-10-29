@@ -14,12 +14,13 @@ const RATE_LIMIT_MESSAGE =
   'Tania está recibiendo muchas consultas en este momento. Intenta nuevamente en unos minutos.';
 
 /**
- * Obtiene la URL base del API
+ * Obtiene la URL base del API.
+ * Vacía = mismo origen (/api/*), que es lo que usa el contenedor en producción.
  */
 function getChatApiUrl() {
-  const baseUrl = import.meta.env.VITE_CHAT_API_URL;
+  const baseUrl = import.meta.env.VITE_CHAT_API_URL?.trim();
   if (!baseUrl) {
-    throw new Error('VITE_CHAT_API_URL no está configurado');
+    return '';
   }
   return baseUrl.replace(/\/$/, ''); // Remover trailing slash si existe
 }
