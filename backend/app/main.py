@@ -13,6 +13,7 @@ from app.services.response_guard import (
     sanitize_assistant_text,
 )
 from app.prompts.tania import TANIA_SYSTEM_PROMPT
+from app.context.tania_context import build_tania_dynamic_context
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -55,9 +56,12 @@ async def chat(request: ChatRequest):
         # Validar request
         request.validate_messages()
 
+        # Prompt base + datos dinámicos (edad y fecha actual en Colombia)
+        system_prompt = TANIA_SYSTEM_PROMPT + "\n\n" + build_tania_dynamic_context()
+
         # Llamar a OpenRouter con fallback (máximo 2 requests)
         response_text = await openrouter.chat(
-            system_prompt=TANIA_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             messages=request.messages,
         )
 

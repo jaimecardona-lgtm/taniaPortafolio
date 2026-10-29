@@ -2,7 +2,9 @@
  * Utilidades para calcular edad y detectar cumpleaños de Tania
  */
 
-const TANIA_BIRTH_DATE = new Date(2003, 1, 24); // Febrero 24, 2003
+// Febrero 24, 2003. Misma fecha biográfica que backend/app/context/tania_context.py
+// (el backend la usa para que el modelo conozca la edad sin depender de este código).
+const TANIA_BIRTH_DATE = new Date(2003, 1, 24);
 
 /**
  * Calcula la edad actual de Tania basada en la fecha actual
